@@ -17,7 +17,7 @@ $filterDate = (Get-Date).AddDays(-180).ToString("yyyy-MM-ddTHH:mm:ssZ")
 $allDevices = @()
 
 # create the api uri with the filter, consitancy is needed to handle dates
-$nextlink ="https://graph.microsoft.com/beta/devicemanagement/manageddevices?`$filter=lastSyncDateTime lt $filterdate&?`$ConsistencyLevel=eventual"
+$nextlink = "https://graph.microsoft.com/beta/devicemanagement/manageddevices?`$filter=lastSyncDateTime lt $filterdate and operatingSystem eq 'Windows'&`$ConsistencyLevel=eventual"
 
 while (![string]::IsNullOrEmpty($nextLink)) { 
     $response = Invoke-MgGraphRequest -Method GET -Uri "$nextLink"
