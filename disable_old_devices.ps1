@@ -1,48 +1,85 @@
-# Use an Azure Vault for storing your client secret for a secured usage and avoid plain text secret
-$global:tenant = "xxxx-xxxx-xxx-xxxx"
-$global:clientId = "xxxx-xxxx-xxx-xxxx"
-$global:clientSecret = "xxxx-xxxx-xxx-xxxx"
-$SecuredPasswordPassword = ConvertTo-SecureString -String $clientSecret -AsPlainText -Force
-$ClientSecretCredential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $clientId, $SecuredPasswordPassword
+# Define mandatory parameters
+param (
+    [Parameter(Mandatory=$true)]
+    [string]$TenantId,
 
-Connect-MgGraph -TenantId $tenant -ClientSecretCredential $ClientSecretCredential
+    [Parameter(Mandatory=$true)]
+    [string]$ClientId,
 
+    [Parameter(Mandatory=$true)]
+    [string]$ClientSecret,
 
-###################################################################################################################
-$filterDate = (Get-Date).AddDays(-180).ToString("yyyy-MM-ddTHH:mm:ssZ")
-###################################################################################################################
+    [Parameter(Mandatory=$true)]
+    [int]$Days,
 
+    [Parameter(Mandatory=$true)]
+    [string]$GroupId,
 
-## create array that will contains managed devices filtered
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("Disable", "Report")]
+    [string]$Mode
+)
+
+$SecuredPasswordPassword = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+$ClientSecretCredential = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $ClientId, $SecuredPasswordPassword
+
+Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $ClientSecretCredential -NoWelcome
+
+$FilterDate = (Get-Date).AddDays(-$Days).ToString("yyyy-MM-ddTHH:mm:ssZ")
 $allDevices = @()
-
-# create the api uri with the filter, consitancy is needed to handle dates
-$nextlink = "https://graph.microsoft.com/beta/devicemanagement/manageddevices?`$filter=lastSyncDateTime lt $filterdate and operatingSystem eq 'Windows'&`$ConsistencyLevel=eventual"
+$nextLink = "https://graph.microsoft.com/beta/devicemanagement/manageddevices?`$filter=lastSyncDateTime lt $FilterDate and operatingSystem eq 'Windows'&`$ConsistencyLevel=eventual"
 
 while (![string]::IsNullOrEmpty($nextLink)) { 
     $response = Invoke-MgGraphRequest -Method GET -Uri "$nextLink"
-    $allDevices += $response.value  # Add this page's devices
-    $nextLink = $response.'@odata.nextLink' # Get the next page's URL
-    Write-Host $nextLink
+    $allDevices += $response.value  
+    $nextLink = $response.'@odata.nextLink'
+    Write-Host "Fetching next page: $nextLink"
 }
 
-# Group ID where you want to put your device
-$groupid = "9b7bd32f-7b3c-4ff6-b30d-63e6857fd432"
+if ($Mode -eq "report") {
+    Write-Warning "Report Mode: Found $($allDevices.Count) stale devices."
+    
+    # Select specific properties for reporting
+    $report = $allDevices | Select-Object id, deviceName, userPrincipalName, lastsyncdatetime
+    
+    # Output the report
+    return $report
+}
 
-foreach ($device in $alldevices) {
-    # Get Entra Object ID
-    $azureaddeviceid=$device.azureADDeviceId
-    $urientra = "https://graph.microsoft.com/beta/devices?`$filter=deviceid eq '$azureaddeviceid'"
-    $request = Invoke-MgGraphRequest -method GET -uri $urientra
-    $entraobjectid = $request.value.id
-    # Add the device into the group
-    $urigroup="https://graph.microsoft.com/v1.0/groups/$groupid/members/`$ref"
-    $body = @{
-        "@odata.id"="https://graph.microsoft.com/v1.0/directoryObjects/{$entraobjectid}"
-      }
-    Invoke-MgGraphRequest -method POST -uri $urigroup -Body $body
-    # Disable the device
-    $uridisable="https://graph.microsoft.com/beta/devices/$entraobjectid"
-    $bodydisable = @{"accountEnabled"="false"}
-    Invoke-MgGraphRequest -method POST -uri $uridisable -Body $bodydisable
+if ($Mode -eq "disable") {
+    Write-Warning "Found $($allDevices.Count) stale devices."
+    $count = $alldevices.count
+    # Display report before proceeding with disabling
+    $report = $allDevices | Select-Object id, deviceName, userPrincipalName, lastsyncdatetime
+    $report | ForEach-Object { Write-Host "$($_.id) - $($_.deviceName) - $($_.userPrincipalName) - $($_.lastsyncdatetime)" }
+    $host.UI.RawUI.ForegroundColor = "Yellow"
+
+    $confirmation = Read-Host "Do you want to disable these $count devices (yes/no)"
+    $host.UI.RawUI.ForegroundColor = "White"
+    if ($confirmation -ne "yes") {
+        Write-Host "Operation cancelled."
+        exit
+    }
+
+    foreach ($device in $allDevices) {
+        $azureaddeviceid = $device.azureADDeviceId
+        if (-not $azureaddeviceid) { continue }
+
+        $urientra = "https://graph.microsoft.com/beta/devices?`$filter=deviceId eq '$azureaddeviceid'"
+        $request = Invoke-MgGraphRequest -Method GET -Uri $urientra
+        $entraobjectid = $request.value.id
+        
+        if ($entraobjectid) {
+            Write-Host "Processing device: $entraobjectid"
+            
+            $urigroup = "https://graph.microsoft.com/v1.0/groups/$GroupId/members/`$ref"
+            $body = @{"@odata.id"="https://graph.microsoft.com/v1.0/directoryObjects/$entraobjectid"}
+            Invoke-MgGraphRequest -Method POST -Uri $urigroup -Body $body
+            
+            $uridisable = "https://graph.microsoft.com/beta/devices/$entraobjectid"
+            $bodydisable = @{"accountEnabled"=$false}
+            Invoke-MgGraphRequest -Method PATCH -Uri $uridisable -Body $bodydisable
+        }
+    }
+    Write-Host "Disable Mode: Processed $($allDevices.Count) stale devices."
 }
